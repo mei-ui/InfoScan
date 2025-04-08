@@ -1,0 +1,144 @@
+---
+title: "SpatialScan_report"
+output:
+    html_document:
+        toc: true
+        toc_float: true
+        number_sections: true
+        theme: paper
+        smooth_scroll: true
+---
+
+<style type="text/css">
+    #header{
+        text-align: center;
+    }
+    body{
+  font-family: Helvetica;
+  font-size: 12pt;
+}
+/* Headers */
+h1,h2,h3,h4,h5,h6{
+  font-size: 14pt;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(error = TRUE)
+```
+```{r , echo=FALSE, message=F,warning=FALSE,error=F}
+
+suppressMessages(library("optparse"))
+suppressMessages(library("CellTrek"))
+suppressMessages(library("dplyr"))
+suppressMessages(library("Seurat"))
+suppressMessages(library("viridis"))
+suppressMessages(library("ConsensusClusterPlus"))
+suppressMessages(library("tidyverse"))
+suppressMessages(library('ComplexHeatmap'))
+suppressMessages(library("SeuratData"))
+suppressMessages(library("cowplot"))
+suppressMessages(library("DT"))
+
+Outputdir=snakemake@params$OutputDir
+SpatialData=snakemake@params$Spatialdata
+scRNAData=snakemake@params$scRNAData
+STpdf=snakemake@params$STpdf
+Coembedding=snakemake@params$Coembedding
+SpatialDimPlot=snakemake@params$SpatialDimPlot
+Celltype=snakemake@params$Celltype
+Heatmap=snakemake@params$Heatmap
+CelltypeFeatureplot=snakemake@params$CelltypeFeatureplot
+CelltypeSpatialplot=snakemake@params$CelltypeSpatialplot
+Gene=snakemake@params$Gene
+GeneSpatial=snakemake@params$GeneSpatial
+GeneSpatialModule=snakemake@params$GeneSpatialModule
+```
+
+```{r , echo=FALSE, message=F,warning=FALSE,error=F}
+brain<-readRDS(SpatialData)
+scRNA=readRDS(scRNAData)
+```
+
+## Integration with single-cell data
+
+* **Visualize the ST data**
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+st=brain
+sc=scRNA
+st <- RenameCells(st, new.names=make.names(Cells(st)))
+sc <- RenameCells(sc, new.names=make.names(Cells(sc)))
+Idents(sc) <- "celltype"
+SpatialDimPlot(st)
+ggsave(STpdf)
+```
+
+* **Cell charting using CellTrek**
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+brain_traint <- CellTrek::traint(st_data=st, sc_data=sc, sc_assay='RNA', cell_names='celltype')
+DimPlot(brain_traint, group.by = "type")
+ggsave(Coembedding)
+```
+
+- After coembedding, we can chart single cells to their spatial locations. Here, we use the non-linear interpolation (intp = T, intp_lin=F) approach to augment the ST spots.
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+brain_celltrek <- CellTrek::celltrek(st_sc_int=brain_traint, int_assay='traint', sc_data=sc, sc_assay = 'RNA', 
+                                   reduction='pca', intp=T, intp_pnt=5000, intp_lin=F, nPCs=30, ntree=1000, 
+                                   dist_thresh=0.55, top_spot=5, spot_n=5, repel_r=20, repel_iter=20, keep_model=T)$celltrek
+#After cell charting, we can interactively visualize the CellTrek result using celltrek_vis
+brain_celltrek$celltype <- factor(brain_celltrek$celltype, levels=sort(unique(brain_celltrek$celltype)))
+Idents(brain_celltrek) <- "celltype"
+SpatialDimPlot(brain_celltrek)
+ggsave(SpatialDimPlot)
+```
+
+- Spatial-weighted gene co-expression analysis within the cell type of interest
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+brain_celltrek_cellsub <- subset(brain_celltrek, subset=celltype== Celltype)
+brain_celltrek_cellsub@assays$RNA@scale.data <- matrix(NA, 1, 1)
+brain_celltrek_cellsub<- FindVariableFeatures(brain_celltrek_cellsub)
+vst_df <- brain_celltrek_cellsub@assays$RNA@meta.features %>% data.frame %>% mutate(id=rownames(.))
+nz_test <- apply(as.matrix(brain_celltrek_cellsub[['RNA']]@data), 1, function(x) mean(x!=0)*100)
+hz_gene <- names(nz_test)[nz_test<20]
+mt_gene <- grep('^mt-|^MT-', rownames(brain_celltrek_cellsub), value=T)
+rp_gene <- grep('^Rpl|^Rps|^RPL|^RPS', rownames(brain_celltrek_cellsub), value=T)
+vst_df <- vst_df %>% dplyr::filter(!(id %in% c(mt_gene, rp_gene, hz_gene))) %>% arrange(., -vst.variance.standardized)
+feature_temp <- vst_df$id[1:2000]
+
+brain_celltrek_scoexp_res_cc <- CellTrek::scoexp(celltrek_inp=brain_celltrek_cellsub, assay='RNA', approach='cc', sigm=140, avg_cor_min=.4, zero_cutoff=3, min_gen=40, max_gen=400)
+
+brain_celltrek_k =c()
+for(i in 1:length(names(brain_celltrek_scoexp_res_cc$gs))){
+    data_frame=data.frame(gene=c(brain_celltrek_scoexp_res_cc$gs[[i]]), G=names(brain_celltrek_scoexp_res_cc$gs)[i])
+    brain_celltrek_k=rbind(brain_celltrek_k,data_frame)
+}
+brain_celltrek_k=brain_celltrek_k %>%magrittr::set_rownames(.$gene) %>% dplyr::select(-1)
+p1=pheatmap::pheatmap(brain_celltrek_scoexp_res_cc$wcor[rownames(brain_celltrek_k), rownames(brain_celltrek_k)], 
+                   clustering_method='ward.D2', annotation_row=brain_celltrek_k, show_rownames=F, show_colnames=F, 
+                   treeheight_row=10, treeheight_col=10, annotation_legend = T, fontsize=8,
+                   color=viridis(10), main='spatial co-expression',filename=Heatmap)
+pheatmap(brain_celltrek_scoexp_res_cc$wcor[rownames(brain_celltrek_k), rownames(brain_celltrek_k)], 
+                   clustering_method='ward.D2', annotation_row=brain_celltrek_k, show_rownames=F, show_colnames=F, 
+                   treeheight_row=10, treeheight_col=10, annotation_legend = T, fontsize=8,
+                   color=viridis(10), main='spatial co-expression')
+```
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+brain_celltrek_cellsub<- AddModuleScore(brain_celltrek_cellsub, features=brain_celltrek_scoexp_res_cc$gs, name='CC_', nbin=10, ctrl=50, seed=42)
+FeaturePlot(brain_celltrek_cellsub, grep('CC_', colnames(brain_celltrek_cellsub@meta.data), value=T))
+ggsave(CelltypeFeatureplot)
+```
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+SpatialFeaturePlot(brain_celltrek_cellsub, grep('CC_', colnames(brain_celltrek_cellsub@meta.data), value=T))
+ggsave(CelltypeSpatialplot)
+```
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+SpatialFeaturePlot(brain_celltrek_cellsub,features=Gene)
+ggsave(GeneSpatial)
+```

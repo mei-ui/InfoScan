@@ -1,0 +1,261 @@
+---
+title: "SpatialScan_report"
+output:
+    html_document:
+        toc: true
+        toc_float: true
+        number_sections: true
+        theme: paper
+        smooth_scroll: true
+---
+
+<style type="text/css">
+    #header{
+        text-align: center;
+    }
+    body{
+  font-family: Helvetica;
+  font-size: 12pt;
+}
+/* Headers */
+h1,h2,h3,h4,h5,h6{
+  font-size: 14pt;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(error = TRUE)
+```
+```{r , echo=FALSE, message=F,warning=FALSE,error=F}
+suppressMessages(library("optparse"))
+suppressMessages(library("CellTrek"))
+suppressMessages(library("dplyr"))
+suppressMessages(library("Seurat"))
+suppressMessages(library("viridis"))
+suppressMessages(library("ConsensusClusterPlus"))
+suppressMessages(library("ComplexHeatmap"))
+suppressMessages(library("tidyverse"))
+suppressMessages(library("SeuratData"))
+suppressMessages(library("cowplot"))
+suppressMessages(library("DT"))
+suppressMessages(library("patchwork"))
+
+Outputdir=snakemake@params$OutputDir # nolint
+SpatialData=snakemake@params$rawdata # nolint # nolint
+scRNAData=snakemake@params$scRNAData # nolint
+STpdf=snakemake@params$STpdf # nolint
+Coembedding=snakemake@params$Coembedding # nolint
+SpatialDimPlot=snakemake@params$SpatialDimPlot # nolint
+Celltype=snakemake@params$Celltype # nolint
+Heatmap=snakemake@params$Heatmap # nolint
+CelltypeFeatureplot=snakemake@params$CelltypeFeatureplot # nolint
+CelltypeSpatialplot=snakemake@params$CelltypeSpatialplot # nolint # nolint
+Gene=snakemake@params$Gene # nolint
+GeneSpatial=snakemake@params$GeneSpatial # nolint
+GeneSpatialModule=snakemake@params$GeneSpatialModule # nolint # nolint
+nCountSpatialBefore=snakemake@params$nCountSpatialBefore # nolint # nolint
+nFeatureSpatialBefore=snakemake@params$nFeatureSpatialBefore # nolint
+percentMTbefore=snakemake@params$percentMTbefore # nolint
+nCountSpatialAfter=snakemake@params$nCountSpatialAfter # nolint
+nFeatureSpatialAfter=snakemake@params$nFeatureSpatialAfter # nolint
+percentMTAfter=snakemake@params$percentMTAfter # nolint
+minCount=snakemake@params$minCount # nolint # nolint
+minFeature=snakemake@params$minFeature# nolint
+maxMT=snakemake@params$maxMT# nolint
+umap=snakemake@params$umap # nolint
+top10genes=snakemake@params$top10genes # nolint
+```
+
+```{r , echo=FALSE, message=F,warning=FALSE,error=F}
+brain<-Seurat::Load10X_Spatial(SpatialData) # nolint
+brain@images[["slice1"]]@coordinates[["tissue"]] <- as.integer(brain@images[["slice1"]]@coordinates[["tissue"]]) # nolint
+brain@images[["slice1"]]@coordinates[["row"]] <- as.integer(brain@images[["slice1"]]@coordinates[["row"]]) # nolint
+brain@images[["slice1"]]@coordinates[["col"]] <- as.integer(brain@images[["slice1"]]@coordinates[["col"]]) # nolint # nolint
+brain@images[["slice1"]]@coordinates[["imagerow"]] <- as.integer(brain@images[["slice1"]]@coordinates[["imagerow"]]) # nolint
+brain@images[["slice1"]]@coordinates[["imagecol"]] <- as.integer(brain@images[["slice1"]]@coordinates[["imagecol"]]) # nolint
+scRNA=readRDS(scRNAData) # nolint
+```
+
+## Pre -processing
+
+    These graphs show that the difference between molecular counts (molecular counts) is not only technical, but also depends on tissue anatomy
+
+### Before QC
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+mt <- PercentageFeatureSet(brain, pattern = "^mt-")
+if(apply(mt,2,sum)==0){brain[["percent.mt"]] <- PercentageFeatureSet(brain, pattern = "^MT-")}else if(apply(mt,2,sum)!=0){brain[["percent.mt"]] <- PercentageFeatureSet(brain, pattern = "^mt-")} # nolint
+
+plot1 <- VlnPlot(brain, features = "nCount_Spatial", pt.size = 0.1) + NoLegend()
+plot2 <- SpatialFeaturePlot(brain, features = "nCount_Spatial") + theme(legend.position = "right") # nolint
+p <- plot1|plot2
+p
+ggsave(nCountSpatialBefore,p, width = 10, height = 6)
+
+p1 <- VlnPlot(brain, features = "nFeature_Spatial") + NoLegend() + theme(axis.text.x = element_blank()) # nolint
+p2 <- SpatialFeaturePlot(brain, features = "nFeature_Spatial") + theme(legend.position = "right") # nolint
+p <- p1|p2
+p
+ggsave(nFeatureSpatialBefore,p, width = 10, height = 6)
+
+p1 <- VlnPlot(brain, features = "percent.mt") + NoLegend() + theme(axis.text.x = element_blank()) # nolint
+p2 <- SpatialFeaturePlot(brain, features = "percent.mt") + theme(legend.position = "right") # nolint
+p <- p1|p2
+p
+ggsave(percentMTbefore, p, width = 10, height = 6)
+```
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+minCount <- minCount
+minCount <- as.numeric(minCount)
+minFeature <- minFeature
+minFeature <- as.numeric(minFeature)
+maxMT <- maxMT
+maxMT <- as.numeric(maxMT)
+print(minCount)
+print(minFeature)
+print(maxMT)
+brain <- subset(brain,nCount_Spatial>minCount&nFeature_Spatial>minFeature&percent.mt<maxMT)
+```
+
+### After QC
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+plot1 <- VlnPlot(brain, features = "nCount_Spatial", pt.size = 0.1) + NoLegend()
+plot2 <- SpatialFeaturePlot(brain, features = "nCount_Spatial") + theme(legend.position = "right") # nolint
+p <- plot1|plot2
+p
+ggsave(nCountSpatialAfter,p, width = 10, height = 6)
+
+p1 <- VlnPlot(brain, features = "nFeature_Spatial") + NoLegend() + theme(axis.text.x = element_blank()) # nolint
+p2 <- SpatialFeaturePlot(brain, features = "nFeature_Spatial") + theme(legend.position = "right") # nolint
+p <- p1|p2
+p
+ggsave(nFeatureSpatialAfter, p, width = 10, height = 6)
+
+p1 <- VlnPlot(brain, features = "percent.mt") + NoLegend() + theme(axis.text.x = element_blank()) # nolint
+p2 <- SpatialFeaturePlot(brain, features = "percent.mt") + theme(legend.position = "right") # nolint
+p <- p1|p2
+p
+ggsave(percentMTAfter, p, width = 10, height = 6)
+```
+
+## Dimensionality reduction, clustering, and visualization
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+set.seed(888)
+brain <- SCTransform(brain, assay = "Spatial")
+brain <- RunPCA(brain, assay = "SCT", verbose = FALSE)
+brain <- FindNeighbors(brain, reduction = "pca", dims = 1:30)
+brain <- FindClusters(brain, verbose = FALSE)
+brain <- RunTSNE(brain, reduction = "pca", dims = 1:30)
+brain <- RunUMAP(brain, reduction = "pca", dims = 1:30)
+p1 <- DimPlot(brain, reduction = "umap", label = TRUE)
+p2 <- SpatialDimPlot(brain, label = TRUE, label.size = 3)
+p3 <- p1|p2
+ggsave(umap, p3)
+p <- SpatialDimPlot(brain, facet.highlight = TRUE, ncol = 5,
+               cells.highlight = CellsByIdentities(brain))
+p
+```  
+
+## Identification of Spatially Variable Features
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+diff.wilcox = FindAllMarkers(brain)
+all.markers = diff.wilcox %>% select(gene, everything()) %>% subset(p_val<0.05)
+top10 = all.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+datatable(top10,rownames = FALSE, filter="top", options = list(pageLength = 5, scrollX=T)) # nolint
+``` 
+
+- Select the top 10 marker genes of each cluster to draw a heatmap
+
+```{r , echo=FALSE, message=F,warning=FALSE, out.width=c('100%'), fig.show='hold'}
+top10_genes = CaseMatch(search = as.vector(top10$gene), match = rownames(brain))  # nolint
+p10 = DoHeatmap(brain, features = top10_genes, group.by = "seurat_clusters", group.bar = T, size = 4) # nolint
+p10
+ggsave(top10genes)
+```
+
+## Integration with single-cell data
+
+* **Visualize the ST data**
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+#brain <- subset(brain, idents = c(0))
+st <- brain
+sc <- scRNA
+st <- RenameCells(st, new.names=make.names(Cells(st)))
+sc <- RenameCells(sc, new.names=make.names(Cells(sc)))
+Idents(sc) <- "celltype"
+SpatialDimPlot(st)
+ggsave(STpdf)
+```
+
+* **Cell charting using CellTrek**
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+brain_traint <- CellTrek::traint(st_data=st, sc_data=sc, sc_assay='RNA', cell_names='celltype') # nolint
+DimPlot(brain_traint, group.by = "type")
+ggsave(Coembedding)
+```
+
+- After coembedding, we can chart single cells to their spatial locations. Here, we use the non-linear interpolation (intp = T, intp_lin=F) approach to augment the ST spots.
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+brain_celltrek <- CellTrek::celltrek(st_sc_int=brain_traint, int_assay='traint', sc_data=sc, sc_assay = 'RNA',  # nolint
+                                   reduction='pca', intp=T, intp_pnt=5000, intp_lin=F, nPCs=30, ntree=1000,  # nolint
+                                   dist_thresh=0.55, top_spot=5, spot_n=5, repel_r=20, repel_iter=20, keep_model=T)$celltrek # nolint
+brain_celltrek$celltype <- factor(brain_celltrek$celltype, levels=sort(unique(brain_celltrek$celltype))) # nolint
+Idents(brain_celltrek) <- "celltype"
+SpatialDimPlot(brain_celltrek)
+ggsave(SpatialDimPlot)
+```
+
+- Spatial-weighted gene co-expression analysis within the cell type of interest
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+brain_celltrek_cellsub <- subset(brain_celltrek, subset=celltype== Celltype)
+brain_celltrek_cellsub@assays$RNA@scale.data <- matrix(NA, 1, 1)
+brain_celltrek_cellsub<- FindVariableFeatures(brain_celltrek_cellsub)
+vst_df <- brain_celltrek_cellsub@assays$RNA@meta.features %>% data.frame %>% mutate(id=rownames(.))
+nz_test <- apply(as.matrix(brain_celltrek_cellsub[['RNA']]@data), 1, function(x) mean(x!=0)*100)
+hz_gene <- names(nz_test)[nz_test<20]
+mt_gene <- grep('^mt-|^MT-', rownames(brain_celltrek_cellsub), value=T)
+rp_gene <- grep('^Rpl|^Rps|^RPL|^RPS', rownames(brain_celltrek_cellsub), value=T)
+vst_df <- vst_df %>% dplyr::filter(!(id %in% c(mt_gene, rp_gene, hz_gene))) %>% arrange(., -vst.variance.standardized)
+feature_temp <- vst_df$id[1:2000]
+
+brain_celltrek_scoexp_res_cc <- CellTrek::scoexp(celltrek_inp=brain_celltrek_cellsub, assay='RNA', approach='cc', sigm=140, avg_cor_min=.5, zero_cutoff=5, min_gen=50, max_gen=500) # nolint
+
+brain_celltrek_k = c()
+for(i in 1:length(names(brain_celltrek_scoexp_res_cc$gs))){ # nolint
+    data_frame=data.frame(gene=c(brain_celltrek_scoexp_res_cc$gs[[i]]), G=names(brain_celltrek_scoexp_res_cc$gs)[i])
+    brain_celltrek_k=rbind(brain_celltrek_k,data_frame)
+}
+brain_celltrek_k=brain_celltrek_k %>%magrittr::set_rownames(.$gene) %>% dplyr::select(-1) # nolint
+p1=pheatmap::pheatmap(brain_celltrek_scoexp_res_cc$wcor[rownames(brain_celltrek_k), rownames(brain_celltrek_k)],  # nolint
+                   clustering_method='ward.D2', annotation_row=brain_celltrek_k, show_rownames=F, show_colnames=F,  # nolint
+                   treeheight_row=10, treeheight_col=10, annotation_legend = T, fontsize=8, # nolint
+                   color=viridis(10), main='spatial co-expression',filename=Heatmap) # nolint
+pheatmap(brain_celltrek_scoexp_res_cc$wcor[rownames(brain_celltrek_k), rownames(brain_celltrek_k)],  # nolint
+                   clustering_method='ward.D2', annotation_row=brain_celltrek_k, show_rownames=F, show_colnames=F,  # nolint
+                   treeheight_row=10, treeheight_col=10, annotation_legend = T, fontsize=8, # nolint
+                   color=viridis(10), main='spatial co-expression')
+```
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+brain_celltrek_cellsub<- AddModuleScore(brain_celltrek_cellsub, features=brain_celltrek_scoexp_res_cc$gs, name='CC_', nbin=10, ctrl=50, seed=42) # nolint
+FeaturePlot(brain_celltrek_cellsub, grep('CC_', colnames(brain_celltrek_cellsub@meta.data), value=T)) # nolint
+ggsave(CelltypeFeatureplot)
+```
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+SpatialFeaturePlot(brain_celltrek_cellsub, grep('CC_', colnames(brain_celltrek_cellsub@meta.data), value=T)) # nolint
+ggsave(CelltypeSpatialplot)
+```
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+SpatialFeaturePlot(brain_celltrek_cellsub, features = Gene) # nolint
+ggsave(GeneSpatial)
+```

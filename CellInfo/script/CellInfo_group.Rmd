@@ -1,0 +1,795 @@
+---
+title: "CellInfo_report"
+output:
+    html_document:
+        toc: true
+        toc_float: true
+        number_sections: true
+        theme: paper
+        smooth_scroll: true
+---
+
+<style type="text/css">
+    #header{
+        text-align: center;
+    }
+    body{
+  font-family: Helvetica;
+  font-size: 12pt;
+}
+/* Headers */
+h1,h2,h3,h4,h5,h6{
+  font-size: 14pt;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(error = TRUE)
+```
+
+```{r , echo=FALSE, message=F,warning=FALSE,error=F}
+suppressMessages(library("stringr"))
+suppressMessages(library("tidyverse"))
+suppressMessages(library("stringi"))
+suppressMessages(library("optparse"))
+suppressMessages(library("patchwork"))
+suppressMessages(library("Seurat"))
+suppressMessages(library("rmarkdown"))
+suppressMessages(library("dplyr"))
+suppressMessages(library("rtracklayer"))
+suppressMessages(library("ggsci"))
+suppressMessages(library("DT"))
+suppressMessages(library("ggrepel"))
+suppressMessages(library("RColorBrewer"))
+suppressMessages(library("ComplexHeatmap"))
+suppressMessages(library("mclust"))
+suppressMessages(library("cluster"))
+
+FPKMmatrix <- snakemake@params$finally_tpm
+allid <- snakemake@params$all_id
+scrna <- snakemake@params$scrna
+unannotatedLncRNA = snakemake@params$unannotatedLncRNA
+unannotatedProtein = snakemake@params$unannotatedProtein
+ConservedScore = snakemake@params$ConservedScore
+Gtfall<-snakemake@params$gtf_all
+proteinCluster=snakemake@params$proteinCluster
+lncRNACluster=snakemake@params$lncRNACluster
+groupChose=snakemake@params$group_chose
+lncRNA_rds=snakemake@params$lncRNA_rds
+protein_rds=snakemake@params$protein_rds
+AllCluster=snakemake@params$AllCluster
+Outputdir <- snakemake@params$Outputdir
+
+scRNA<-readRDS(scrna)
+
+```
+
+## Highly Variable Features (HVGs)
+
+* **Highly Variable Features:**
+
+  Use the FindVariableFeatures function to identify hypervariable genes whose expression levels vary widely between cells (highly expressed in some cells and lowly expressed in others).  By default, 2,000 hypervariable genes are returned for downstream analysis
+
+```{r , echo=FALSE, message=F,warning=FALSE,fig.align="center",fig.cap="High Variable Features"}
+top10 <- head(VariableFeatures(scRNA), 10) 
+p1 <- VariableFeaturePlot(scRNA) 
+p2 <- LabelPoints(plot = p1, points = top10, repel = TRUE, size=2.5) 
+p3 <- CombinePlots(plots = list(p1,p2),legend="bottom") 
+p3
+```
+
+## PCA 
+
+* **PCA result:**
+
+  PCA dimensionality reduction and extraction of principal components
+
+```{r , echo=FALSE, message=F,warning=FALSE,out.width=c('50%', '50%'), fig.show='hold'}
+p4 <- DimPlot(scRNA, reduction = "pca") 
+p5 <- ElbowPlot(scRNA, ndims=30, reduction="pca") 
+p6<- p4+p5
+p4
+p5
+```
+
+## Cell Clustering and Nonlinear Dimensionality Reduction
+
+
+* **Cell Clustering:**
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+print(table(scRNA@meta.data$seurat_clusters))
+``` 
+
+* **tSNE and UMAP:**
+
+```{r , echo=FALSE, message=F,warning=FALSE, out.width=c('50%', '50%'), fig.show='hold'}
+p7 = DimPlot(scRNA, reduction = "tsne",label = T) 
+p8 = DimPlot(scRNA, reduction = "umap",label = T) 
+p9 = CombinePlots(plots = list(p7,p8),legend="right")
+p7
+p8
+```
+
+* **cluster marker gene:**
+
+  Use the FindAllMarkers() function to identify marker genes for each cluster
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+diff.wilcox = FindAllMarkers(scRNA)
+all.markers = diff.wilcox %>% select(gene, everything()) %>% subset(p_val<0.05)
+top10 = all.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+datatable(top10,rownames = FALSE, filter="top", options = list(pageLength = 5, scrollX=T))
+```
+
+  Select the top 10 marker genes of each cluster to draw a heatmap
+
+```{r , echo=FALSE, message=F,warning=FALSE, out.width=c('100%'), fig.show='hold'}
+top10_genes = CaseMatch(search = as.vector(top10$gene), match = rownames(scRNA)) 
+p10 = DoHeatmap(scRNA, features = top10_genes, group.by = "seurat_clusters", group.bar = T, size = 4)
+p10
+```
+
+  Volcano plot 
+
+```{r , echo=FALSE, message=F,warning=FALSE, out.width=c('100%'), fig.show='hold'}
+# 选取上下调超过25%，且矫正p值小于0.05：
+data <- all.markers
+padj <- 0.05
+data$change <- ifelse(data$avg_log2FC >= 1 & data$p_val < padj, 
+                      "Up regulate",
+                      ifelse(data$avg_log2FC < -1 & data$p_val < padj,
+                             "Down regulate", 
+                             "Not significant"))
+top10_1 <- data %>% group_by(cluster) %>% top_n(n = 10, wt = abs(avg_log2FC))
+tab_class<-as.data.frame(table(data$cluster))
+if(nrow(tab_class)<=12){col_key<-brewer.pal(nrow(tab_class), "Set3")}
+if(nrow(tab_class)>12&nrow(tab_class)<=24){col_key<-c(brewer.pal(12, "Set3"),pal_futurama()(nrow(tab_class)-12))}
+if(nrow(tab_class)>24){col_key<-hcl.pals("sequential")[0:nrow(tab_class)]}
+# 美化1：
+ggplot(data)+
+  # 抖动散点：
+  geom_jitter(aes(cluster, avg_log2FC, color = change),
+              size=0.85, width = 0.4, alpha= .8)+
+  # 分组方块：
+  geom_tile(aes(cluster, 0, fill = cluster),
+            height=0.8,
+            color = "black",
+            alpha = 0.5,
+            show.legend = F,
+            width=0.85) +
+  # 文字：
+  geom_text(data = data[!duplicated(data$cluster), ], 
+            aes(cluster, 0, label = cluster),
+            size =4,
+            color ="black") +
+  # 基因标签：
+  geom_text_repel(
+    data = top10_1,
+    aes(cluster, avg_log2FC, label = gene),
+    size=3, max.overlaps = 100
+  ) +
+  xlab("Cell Subtype")+
+  ylab("log2FoldChange")+
+  # 颜色模式
+  scale_fill_manual(values = col_key)+
+  scale_color_manual(name = "Regulate", values = c("#b3de69","#999999","#fb8072"))+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5),
+        legend.position = "top")
+```
+
+* **unannotated transcripts**
+
+  Unannotated transcripts in the marker gene of each cluster
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+a<-str_match(all.markers$gene,pattern='TCONS-[0-9]*')
+a<-as.data.frame(a)
+a<-na.omit(a)
+lncRNA_marker<-all.markers[which(all.markers$gene %in% c(as.character(a$V1))),]
+unannotated_lncRNA<-read.csv(unannotatedLncRNA)
+unannotated_lncRNA$type="unannotated_lncRNA"
+unannotated_protein<-read.csv(unannotatedProtein)
+unannotated_protein$type="unannotated_coding_transcripts"
+unannotated_lncRNA<-rbind(unannotated_lncRNA,unannotated_protein)
+unannotated_lncRNA$Geneid<-stri_replace_all_regex(unannotated_lncRNA$Geneid,'_','-')
+unannotated_lncRNA_eset<-unannotated_lncRNA[,7:(ncol(unannotated_lncRNA)-1)]
+unannotated_lncRNA_eset$TPM<-apply(unannotated_lncRNA_eset,1,sum)
+unannotated_lncRNA$TPM<-unannotated_lncRNA_eset$TPM
+lncRNA<-inner_join(unannotated_lncRNA,lncRNA_marker,by=c('Geneid'='gene'))
+lncRNA<-lncRNA[,which(colnames(lncRNA)%in%c('Geneid','Chr','Start','End','Strand','Length','type','p_val','avg_log2FC','pct.1','pct.2','p_val_adj','cluster','TPM','type'))]
+datatable(lncRNA,rownames = FALSE, filter="top", options = list(pageLength = 5, scrollX=T))
+```
+
+  Select the top 5 marker genes of each cluster to draw plot
+
+```{r , echo=FALSE, message=F,warning=FALSE, out.width='90%',fig.width=20,fig.hight=40}
+
+lncRNA_marker_gene<-lncRNA_marker %>% select(gene, everything()) %>% subset(p_val<0.05)
+top10_1 = lncRNA_marker_gene %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+lncRNA_marker_gene_1 <- c(top10_1$gene)
+lncRNA_marker_gene_1<-unique(lncRNA_marker_gene_1)
+if(length(lncRNA_marker_gene_1)<=10){
+  p1<-VlnPlot(scRNA,features = lncRNA_marker_gene_1,
+            pt.size = 0.1,group.by = "seurat_clusters",ncol = 5)
+  p2 <- FeaturePlot(scRNA,features = lncRNA_marker_gene_1,
+                  reduction = "tsne",label = T,ncol =5)
+
+}
+if(10<length(lncRNA_marker_gene_1)&length(lncRNA_marker_gene_1)<=20){
+  p1<-VlnPlot(scRNA,features = lncRNA_marker_gene_1,
+            pt.size = 0.1,group.by = "seurat_clusters",ncol = 5)
+  p2 <- FeaturePlot(scRNA,features = lncRNA_marker_gene_1,
+                  reduction = "tsne",label = T,ncol =5)
+
+}
+if(20<length(lncRNA_marker_gene_1)&length(lncRNA_marker_gene_1)<=30){
+  p1<-VlnPlot(scRNA,features = lncRNA_marker_gene_1,
+            pt.size = 0.1,group.by = "seurat_clusters",ncol = 5)
+  p2 <- FeaturePlot(scRNA,features = lncRNA_marker_gene_1,
+                  reduction = "tsne",label = T,ncol =5)
+
+}
+if(30<length(lncRNA_marker_gene_1)&length(lncRNA_marker_gene_1)<=40){
+  p1<-VlnPlot(scRNA,features = lncRNA_marker_gene_1,
+            pt.size = 0.1,group.by = "seurat_clusters",ncol = 5)
+  p2 <- FeaturePlot(scRNA,features = lncRNA_marker_gene_1,
+                  reduction = "tsne",label = T,ncol =5)
+
+}
+if(40<length(lncRNA_marker_gene_1)&length(lncRNA_marker_gene_1)<=50){
+  p1<-VlnPlot(scRNA,features = lncRNA_marker_gene_1,
+            pt.size = 0.1,group.by = "seurat_clusters",ncol = 5)
+  p2 <- FeaturePlot(scRNA,features = lncRNA_marker_gene_1,
+                  reduction = "tsne",label = T,ncol =5)
+
+}
+p1
+
+p2
+```
+
+## Tissue Information
+
+* **Tissue display by tSNE and UMAP:**
+
+```{r , echo=FALSE, message=F,warning=FALSE, out.width=c('50%', '50%'), fig.show='hold',fig.width=10}
+p11 = DimPlot(scRNA, group.by=groupChose, label=F, label.size=5, reduction='tsne')
+p12 = DimPlot(scRNA, group.by=groupChose, label=F, label.size=5, reduction='umap')
+p11
+p12
+```
+
+## Cell Type Idenity
+
+
+* **celltype tSNE and UMAP:**
+
+  Cell type identification using SingleR or Celltypist
+
+```{r , echo=FALSE, message=F,warning=FALSE, out.width=c('50%', '50%'), fig.show='hold',fig.width=10}
+p11 = DimPlot(scRNA, group.by="celltype", label=F, label.size=5, reduction='tsne')
+p12 = DimPlot(scRNA, group.by="celltype", label=F, label.size=5, reduction='umap')
+p11
+p12
+```
+
+  Ratio of cell type
+
+```{r , echo=FALSE, message=F,warning=FALSE, out.width=c('100%'), fig.show='hold'}
+colour=c("#20B2AA","#FFA500","#9370DB","#98FB98","#F08080","#1E90FF","#7CFC00","#FFFF00",  
+         "#808000","#FF00FF","#FA8072","#7B68EE","#9400D3","#800080","#A0522D","#D2B48C","#D2691E","#87CEEB","#40E0D0","#5F9EA0",
+         "#FF1493","#0000CD","#008B8B","#FFE4B5","#8A2BE2","#228B22","#E9967A","#4682B4","#32CD32","#F0E68C","#FFFFE0","#EE82EE",
+         "#FF6347","#6A5ACD","#9932CC","#8B008B","#8B4513","#DEB887")
+#分样本
+sample_table <- as.data.frame(table(eval(parse(text = paste0("scRNA","$",groupChose))),scRNA@meta.data$celltype))
+names(sample_table) <- c("Samples","celltype","CellNumber")
+
+plot_sample<-ggplot(sample_table,aes(x=Samples,weight=CellNumber,fill=celltype))+
+  geom_bar(position="fill")+
+  scale_fill_manual(values=colour) + 
+  theme(panel.grid = element_blank(),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        axis.line.x = element_line(colour = "black") ,
+        axis.line.y = element_line(colour = "black") ,
+        plot.title = element_text(lineheight=.8, face="bold", hjust=0.5, size =16)
+  )+labs(y="Percentage")+RotatedAxis()
+plot_sample
+```
+
+Volcano plot 
+
+```{r , echo=FALSE, message=F,warning=FALSE, out.width=c('100%'), fig.show='hold'}
+marker_gene=c()
+AllGene=c()
+if(length(unique(scRNA@meta.data$celltype))>1){
+  for( i in unique(scRNA@meta.data$celltype)){
+  markers_df <- FindMarkers(object = scRNA, ident.1 = i, min.pct = 0.25,group.by = 'celltype',only.pos=F)
+  markers_df$celltype=i
+  AllGene=rbind(AllGene,markers_df)
+  markers_gene = markers_df  %>% subset(p_val<0.05)
+  markers_gene = markers_gene %>% top_n(n = 15, wt = avg_log2FC)
+  markers_gene = markers_gene[order(-markers_gene$avg_log2FC),]
+  unannotated_markers_gene = markers_df  %>% subset(p_val<0.05)
+  a<-unannotated_markers_gene[str_match(rownames(unannotated_markers_gene),pattern='TCONS-[0-9]*'),]
+  a=na.omit(a)
+  a=a[order(-a$avg_log2FC),]
+  marker_gene=rbind(marker_gene,a)
+}}
+marker_gene$gene=rownames(marker_gene)
+# 选取上下调超过25%，且矫正p值小于0.05：
+data <- AllGene
+data$gene=rownames(data)
+padj <- 0.05
+data$change <- ifelse(data$avg_log2FC >= log2(1.25) & data$p_val < padj, 
+                      "Up regulate",
+                      ifelse(data$avg_log2FC < log2(0.75) & data$p_val < padj,
+                             "Down regulate", 
+                             "Not significant"))
+top10_1 <- data %>% group_by(celltype) %>% top_n(n = 10, wt = abs(avg_log2FC))
+tab_class<-as.data.frame(table(data$celltype))
+if(nrow(tab_class)<=12){col_key<-brewer.pal(nrow(tab_class), "Set3")}
+if(nrow(tab_class)>12&nrow(tab_class)<=24){col_key<-c(brewer.pal(12, "Set3"),pal_futurama()(nrow(tab_class)-12))}
+if(nrow(tab_class)>24){col_key<-hcl.pals("sequential")[0:nrow(tab_class)]}
+# 美化1：
+ggplot(data)+
+  # 抖动散点：
+  geom_jitter(aes(celltype, avg_log2FC, color = change),
+              size=0.85, width = 0.4, alpha= .8)+
+  # 分组方块：
+  geom_tile(aes(celltype, 0, fill = celltype),
+            height=0.8,
+            color = "black",
+            alpha = 0.5,
+            show.legend = F,
+            width=0.85) +
+  # 文字：
+  geom_text(data = data[!duplicated(data$celltype), ], 
+            aes(celltype, 0, label = celltype),
+            size =4,
+            color ="black") +
+  # 基因标签：
+  geom_text_repel(
+    data = top10_1,
+    aes(celltype, avg_log2FC, label = gene),
+    size=3, max.overlaps = 100
+  ) +
+  xlab("Cell Subtype")+
+  ylab("log2FoldChange")+
+  # 颜色模式
+  scale_fill_manual(values = col_key)+
+  scale_color_manual(name = "Regulate", values = c("#b3de69","#999999","#fb8072"))+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5),
+        legend.position = "top")
+```
+
+* **unannotated transcripts**
+  
+  Unannotated transcripts in the marker gene of each celltype
+
+```{r , echo=FALSE, message=F,warning=FALSE}
+datatable(marker_gene,rownames = TRUE, filter="top", options = list(pageLength = 5, scrollX=T))
+```
+
+
+
+```{r , echo=FALSE, message=F,warning=FALSE, out.width='90%',out.hight='100%',fig.width=20,fig.hight=40}
+marker_gene2 = marker_gene  %>% group_by(celltype) %>% top_n(n = 2, wt = avg_log2FC)
+print(head(marker_gene2))
+unannotated_marker_gene <- c(marker_gene2$gene)
+unannotated_marker_gene<-unique(unannotated_marker_gene)
+if(length(unannotated_marker_gene)<=10){
+  p1<-VlnPlot(scRNA,features = unannotated_marker_gene,
+            pt.size = 0.1,group.by = "celltype",ncol = 5)
+  p2 <- FeaturePlot(scRNA,features = unannotated_marker_gene,
+                  reduction = "tsne",label = T,ncol =5)
+}
+if(10<length(unannotated_marker_gene)&length(unannotated_marker_gene)<=20){
+  p1<-VlnPlot(scRNA,features = unannotated_marker_gene,
+            pt.size = 0.1,group.by = "celltype",ncol = 5)
+  p2 <- FeaturePlot(scRNA,features = unannotated_marker_gene,
+                  reduction = "tsne",label = T,ncol =5)
+}
+if(20<length(unannotated_marker_gene)&length(unannotated_marker_gene)<=30){
+  p1<-VlnPlot(scRNA,features = unannotated_marker_gene,
+            pt.size = 0.1,group.by = "celltype",ncol = 5)
+  p2 <- FeaturePlot(scRNA,features = unannotated_marker_gene,
+                  reduction = "tsne",label = T,ncol =5)
+
+}
+if(30<length(unannotated_marker_gene)&length(unannotated_marker_gene)<=40){
+  p1<-VlnPlot(scRNA,features = unannotated_marker_gene,
+            pt.size = 0.1,group.by = "celltype",ncol = 5)
+  p2 <- FeaturePlot(scRNA,features = unannotated_marker_gene,
+                  reduction = "tsne",label = T,ncol =5)
+
+}
+if(40<length(unannotated_marker_gene)&length(unannotated_marker_gene)<=50){
+  p1<-VlnPlot(scRNA,features = unannotated_marker_gene,
+            pt.size = 0.1,group.by = "celltype",ncol = 5)
+  p2 <- FeaturePlot(scRNA,features = unannotated_marker_gene,
+                  reduction = "tsne",label = T,ncol =5)
+
+}
+p1
+
+p2
+
+```
+
+## Unannotated Transcript Features
+
+* **Evolutionary Conservation**
+
+```{r,echo=FALSE, message=F,warning=FALSE}
+conservedscore<-read.table(ConservedScore)
+all_id<-read.table(allid)
+colnames(all_id)=c("id","type")
+gtf_all<-rtracklayer::import(Gtfall)
+gtf_df<-as.data.frame(gtf_all)
+a<-str_match(gtf_df$transcript_id,pattern='TCONS_[0-9]*')
+a<-as.data.frame(a)
+a<-na.omit(a)
+gtf_df_1<-inner_join(gtf_df,a,by=c("transcript_id"="V1"))
+gtf_df_1$gene_name<-gtf_df_1$transcript_id
+gtf_df_1<-unique(gtf_df_1)
+id<-gtf_df[,which(colnames(gtf_df)%in%c("transcript_id","gene_name"))]
+id<-na.omit(id)
+id<-unique(id)
+id_1<-gtf_df_1[,which(colnames(gtf_df_1)%in%c("transcript_id","gene_name"))]
+id_1<-na.omit(id_1)
+id_1<-unique(id_1)
+id_2<-rbind(id,id_1)
+conservedscore <-inner_join(conservedscore,id_2,by=c("V1"="transcript_id"))
+conservedscore_1<-inner_join(conservedscore,all_id,by=c('gene_name'='id'))
+conservedscore_1<-unique(conservedscore_1)
+#protein_coding
+protein_coding<-conservedscore_1[which(conservedscore_1$type%in%c('protein_coding')),]
+protein_coding_1<-protein_coding[,which(colnames(protein_coding)%in%c('V1','V6','type'))]
+colnames(protein_coding_1)<-c('transcript_id','conserved_score','type')
+#annotated_lncRNA
+annotated_lncRNA<-conservedscore_1[which(conservedscore_1$type%in%c('annotated_lncRNA')),]
+annotated_lncRNA_1<-annotated_lncRNA[,which(colnames(annotated_lncRNA)%in%c('V1','V6','type'))]
+colnames(annotated_lncRNA_1)<-c('transcript_id','conserved_score','type')
+#unannotated_lncRNA
+unannotated_lncRNA<-conservedscore_1[which(conservedscore_1$type%in%c('unannotated_lncRNA')),]
+unannotated_lncRNA_1<-unannotated_lncRNA[,which(colnames(unannotated_lncRNA)%in%c('V1','V6','type'))]
+colnames(unannotated_lncRNA_1)<-c('transcript_id','conserved_score','type')
+#unannotated_protein
+unannotated_protein<-conservedscore_1[which(conservedscore_1$type%in%c('unannotated_coding_transcript')),]
+unannotated_protein_1<-unannotated_protein[,which(colnames(unannotated_protein)%in%c('V1','V6','type'))]
+colnames(unannotated_protein_1)<-c('transcript_id','conserved_score','type')
+df_1<-rbind(unannotated_lncRNA,unannotated_protein)
+df_1<-df_1[,which(colnames(df_1)%in%c("gene_name","V1","V6","type"))]
+colnames(df_1)<-c("transcript_id","conserved_score","gene_name","type")
+df_1$transcript_id<-stri_replace_all_regex(df_1$transcript_id,'_','-')
+df_1=inner_join(df_1,marker_gene,by=c("transcript_id"="gene"))
+df_1<-df_1[,which(colnames(df_1)%in%c("transcript_id","conserved_score","gene_name","type"))]
+df<-rbind(protein_coding_1,annotated_lncRNA_1,unannotated_lncRNA_1,unannotated_protein_1)
+datatable(df_1,rownames = FALSE, filter="top", options = list(pageLength = 5, scrollX=T))
+```
+
+```{r , echo=FALSE, message=F,warning=FALSE, out.width=c('100%'), fig.show='hold'}
+col_key<-pal_futurama()(4)
+p14=ggplot(df,aes(conserved_score,color=type)) + 
+  xlab("Conserved Score") + 
+  stat_ecdf(alpha=1) + 
+  labs(title = "gene conservation")+
+  theme_bw()+scale_color_aaas()
+p14
+```
+
+* **Tissue/Cell Type Specific**
+
+  Calculate cell type specificity of each transcript separately with JS specificity Score
+
+```{r, echo=FALSE,out.width='100%',out.hight='80%',fig.show='hold'}
+knitr::include_graphics("../../snakemake/result/celltype_specificity_ecdf.png")
+```
+
+  Display cell-type specificity of transcripts as a heatmap
+
+
+```{r , echo=FALSE, message=F,warning=FALSE, out.width=c('100%'),out.hight='80%', fig.show='hold'}
+finally_fpkm <- read.table(FPKMmatrix,header=T)
+name<-as.data.frame(table(finally_fpkm$Geneid))
+name<-dplyr::filter(name,Freq>1)
+if(nrow(name)!=0){finally_fpkm_1<-finally_fpkm[-which(finally_fpkm$Geneid%in%c(as.character(name$Var1))),]}else {finally_fpkm_1<-finally_fpkm}
+celltype<-as.data.frame(scRNA$celltype)
+colnames(celltype)<-'celltype'
+celltype$sample<-rownames(celltype)
+fpkm<-finally_fpkm_1[,7:(ncol(finally_fpkm_1)-1)]
+rownames(fpkm)<-finally_fpkm_1$Geneid
+fpkm_1<-as.data.frame(t(fpkm))
+fpkm_1$sample<-rownames(fpkm_1)
+fpkm_1<-inner_join(fpkm_1,celltype,by=c('sample'='sample'))
+fpkm_group = fpkm_1 %>% group_by(celltype) 
+#n<-nrow(table(fpkm_1$celltype))
+x<-group_split(fpkm_group)
+n=length(x)
+data<-x[[1]]
+data<-as.data.frame(data)                               
+data_eset<-data[,1:(ncol(data)-2)]
+data_1<-apply(data_eset,2,mean)
+name<-as.character(unique(data$celltype))
+data_1<-as.data.frame(data_1)
+colnames(data_1)<-name
+for (i in 2:as.numeric(n)) {
+            data_2<-x[[i]]
+            data_2<-as.data.frame(data_2)
+            data_eset_2<-data_2[,1:(ncol(data_2)-2)]
+            data_3<-apply(data_eset_2,2,mean)
+            name_2<-as.character(unique(data_2$celltype))
+            data_3<-as.data.frame(data_3)
+            colnames(data_3)<-name_2
+            data_1<-cbind(data_1,data_3)
+}
+fpkm_2<-data_1
+fpkm_2$gene_id<-row.names(fpkm_2)
+id<-finally_fpkm_1[,which(colnames(finally_fpkm_1)%in%c("Geneid","type"))]
+finally_fpkm_3<-inner_join(id,fpkm_2,by=c('Geneid'='gene_id'))
+finally_fpkm_3=finally_fpkm_3[which(finally_fpkm_3$type%in%c('protein_coding','annotated_lncRNA','unannotated_lncRNA','unannotated_coding_transcript')),]
+finally_fpkm_eset = finally_fpkm_3[,-which(colnames(finally_fpkm_3)%in%c("Geneid","type"))]
+group=finally_fpkm_3[,which(colnames(finally_fpkm_3)%in%c("Geneid","type"))]
+rownames(finally_fpkm_eset)<-finally_fpkm_3$Geneid
+finally_fpkm_eset<- finally_fpkm_eset[apply(finally_fpkm_eset, 1, function(x) sd(x)!=0),]
+Group=as.data.frame(rownames(finally_fpkm_eset))
+colnames(Group)='id'
+Group=inner_join(Group,group,by=c("id"="Geneid"))
+Group1=Group[,"type",drop=F]
+rownames(Group1)=Group$id
+finally_fpkm_eset=log2(finally_fpkm_eset+1)#标准化处理
+Group1$type = factor(Group1$type,levels = c('protein_coding','annotated_lncRNA','unannotated_lncRNA','unannotated_coding_transcript')) # nolint # nolint
+
+col_key1<-pal_futurama()(ncol(finally_fpkm_eset))
+col_anno=as.data.frame(colnames(finally_fpkm_eset))
+colnames(col_anno)=c("celltype")
+top_annotation = HeatmapAnnotation(cluster = anno_block(gp = gpar(fill = col_key1),
+                   labels = colnames(finally_fpkm_eset),
+                   labels_gp = gpar(col = "black", fontsize = 8)),annotation_height=unit(0.4, "cm"))
+col_key2=pal_futurama()(length(table(Group1$type)))
+row_annotation = rowAnnotation(cluster = anno_block(gp = gpar(fill = col_key2)),width=unit(0.4, "cm"))
+set.seed(888)
+p1=Heatmap(finally_fpkm_eset,#表达矩阵
+    show_row_names = F,#不展示行名
+    row_split = Group1,#用group信息将热土分开，以group聚类
+    column_title = "Celltype Heatmap",#不显示列标题
+    show_column_names = F,#不显示列名
+    row_title_rot = 0,
+    column_split=col_anno,
+    show_parent_dend_line = FALSE,#隐藏虚线
+    top_annotation = top_annotation,#顶部分组信息
+    left_annotation = row_annotation,
+    gap = unit(2, "mm"),
+    show_column_dend = FALSE,#不显示列的树状图
+    row_title_gp = gpar(col = col_key2),
+    border = TRUE,#添加边界
+    heatmap_legend_param = list(title = "Expression"),
+    cluster_rows = TRUE)
+p1
+```
+
+* **Tissue Specific**
+
+  Calculate Tissue specificity of each transcript separately with JS specificity Score
+
+```{r, echo=FALSE,out.width='100%',out.hight='80%',fig.show='hold'}
+knitr::include_graphics("../../snakemake/result/tissue_specificity_ecdf.png")
+```
+
+  Display tissue specificity of transcripts as a heatmap
+
+
+```{r , echo=FALSE, message=F,warning=FALSE, out.width=c('100%'),out.hight='80%', fig.show='hold'}
+finally_fpkm <- read.table(FPKMmatrix,header=T)
+name<-as.data.frame(table(finally_fpkm$Geneid))
+name<-dplyr::filter(name,Freq>1)
+if(nrow(name)!=0){finally_fpkm_1<-finally_fpkm[-which(finally_fpkm$Geneid%in%c(as.character(name$Var1))),]}else {finally_fpkm_1<-finally_fpkm}
+tissue = eval(parse(text = paste0("scRNA","$",groupChose)))
+tissue<-as.data.frame(tissue)
+colnames(tissue)<-"tissue"
+tissue$sample<-rownames(tissue)
+fpkm<-finally_fpkm_1[,7:(ncol(finally_fpkm_1)-1)]
+rownames(fpkm)<-finally_fpkm_1$Geneid
+fpkm_1<-as.data.frame(t(fpkm))
+fpkm_1$sample<-rownames(fpkm_1)
+fpkm_1<-inner_join(fpkm_1,tissue,by=c('sample'='sample'))
+fpkm_group = fpkm_1 %>% group_by(tissue) 
+#n<-nrow(table(fpkm_1$tissue))
+x<-group_split(fpkm_group)
+n=length(x)
+data<-x[[1]]
+data<-as.data.frame(data)               
+data_eset<-data[,1:(ncol(data)-2)]
+data_1<-apply(data_eset,2,mean)
+name<-as.character(unique(data$tissue))
+data_1<-as.data.frame(data_1)
+colnames(data_1)<-name
+for (i in 2:as.numeric(n)) {
+      data_2<-x[[i]]
+      data_2<-as.data.frame(data_2)
+      data_eset_2<-data_2[,1:(ncol(data_2)-2)]
+      data_3<-apply(data_eset_2,2,mean)
+      name_2<-as.character(unique(data_2$tissue))
+      data_3<-as.data.frame(data_3)
+      colnames(data_3)<-name_2
+      data_1<-cbind(data_1,data_3)
+}
+fpkm_2<-data_1
+fpkm_2$gene_id<-row.names(fpkm_2)
+id<-finally_fpkm_1[,which(colnames(finally_fpkm_1)%in%c("Geneid","type"))]
+finally_fpkm_3<-inner_join(id,fpkm_2,by=c('Geneid'='gene_id'))
+finally_fpkm_3=finally_fpkm_3[which(finally_fpkm_3$type%in%c('protein_coding','annotated_lncRNA','unannotated_lncRNA','unannotated_coding_transcript')),]
+finally_fpkm_eset = finally_fpkm_3[,-which(colnames(finally_fpkm_3)%in%c("Geneid","type"))]
+group=finally_fpkm_3[,which(colnames(finally_fpkm_3)%in%c("Geneid","type"))]
+rownames(finally_fpkm_eset)<-finally_fpkm_3$Geneid
+finally_fpkm_eset<- finally_fpkm_eset[apply(finally_fpkm_eset, 1, function(x) sd(x)!=0),]
+Group=as.data.frame(rownames(finally_fpkm_eset))
+colnames(Group)='id'
+Group=inner_join(Group,group,by=c("id"="Geneid"))
+Group1=Group[,"type",drop=F]
+rownames(Group1)=Group$id
+finally_fpkm_eset=log2(finally_fpkm_eset+1)#标准化处理
+Group1$type = factor(Group1$type,levels = c('protein_coding','annotated_lncRNA','unannotated_lncRNA','unannotated_coding_transcript'))
+
+col_key1<-pal_futurama()(ncol(finally_fpkm_eset))
+col_anno=as.data.frame(colnames(finally_fpkm_eset))
+colnames(col_anno)=c("tissue")
+top_annotation = HeatmapAnnotation(cluster = anno_block(gp = gpar(fill = col_key1),
+                   labels = colnames(finally_fpkm_eset),
+                   labels_gp = gpar(col = "black", fontsize = 8)),annotation_height=unit(0.4, "cm"))
+col_key2=pal_futurama()(length(table(Group1$type)))
+row_annotation = rowAnnotation(cluster = anno_block(gp = gpar(fill = col_key2)),width=unit(0.4, "cm"))
+p111=Heatmap(finally_fpkm_eset,#表达矩阵
+#     col = colorRampPalette(c("navy","white","firebrick3"))(100),#颜色定义
+    show_row_names = F,#不展示行名
+    row_split = Group1,#用group信息将热土分开，以group聚类
+    column_title = "Tissue Heatmap",#不显示列标题
+    show_column_names = F,#不显示列名
+    row_title_rot = 0,
+    column_split=col_anno,
+    show_parent_dend_line = FALSE,#隐藏虚线
+    top_annotation = top_annotation,#顶部分组信息
+    left_annotation = row_annotation,
+    gap = unit(2, "mm"),
+    show_column_dend = FALSE,#不显示列的树状图
+    row_title_gp = gpar(col = col_key2),
+    border = TRUE,#添加边界
+    heatmap_legend_param = list(title = "Expression"),
+    cluster_rows = TRUE)
+p111
+```
+
+## Compare mRNAs and lncRNAs
+
+* **Calculate the cell-cell relationship by mRNAs and lncRNAs**
+
+```{r , echo=FALSE, message=F,warning=FALSE, out.width=c('50%','50%'), fig.show='hold'}
+
+lncRNA<-readRDS(lncRNA_rds)
+protein<-readRDS(protein_rds)
+sample_cor1 <- cor(Matrix::t(lncRNA@reductions[["pca"]]@cell.embeddings))
+#sample_cor1 = cor(lncRNA[['RNA']]@scale.data)
+sample_cor1 <- (1 - sample_cor1)/2
+p1<-Heatmap(sample_cor1,
+         show_column_names = FALSE,
+         show_column_dend = FALSE,
+         show_row_dend = FALSE,
+         column_title = "lncRNA",
+         show_row_names = F
+)
+sample_cor2 <- cor(Matrix::t(protein@reductions[["pca"]]@cell.embeddings))
+sample_cor2 <- (1 - sample_cor2)/2
+p2<-Heatmap(sample_cor2,
+         show_column_names = FALSE,
+         show_column_dend = FALSE,
+         show_row_dend = FALSE,
+         column_title = "mRNA",
+         show_row_names = F
+)
+p1
+p2
+```
+
+* **Cluster cells by mRNA**
+
+```{r , echo=FALSE, message=F,warning=FALSE, out.width=c('50%','50%'), fig.show='hold'}
+protein_cluster =  read.csv(proteinCluster)
+colnames(protein_cluster) = c("cell_ID","protein")
+rownames(protein_cluster) = protein_cluster$cell_ID
+scRNA = AddMetaData(object = scRNA, metadata = protein_cluster)
+
+plot1 = DimPlot(scRNA, reduction = "tsne",label =F ,group.by="protein")
+plot2 = DimPlot(scRNA, reduction = "tsne",label =F ,group.by="celltype")
+plot1
+plot2
+```
+
+* **Cluster cells by lncRNA**
+
+```{r , echo=FALSE, message=F,warning=FALSE, out.width=c('50%','50%'), fig.show='hold',fig_caption=TRUE}
+lncRNA_cluster =  read.csv(lncRNACluster)
+colnames(lncRNA_cluster) = c("cell_ID","lncRNA")
+rownames(lncRNA_cluster) = lncRNA_cluster$cell_ID
+scRNA = AddMetaData(object = scRNA, metadata = lncRNA_cluster)
+
+plot3 = DimPlot(scRNA, reduction = "tsne",label =F ,group.by="lncRNA")
+plot4 = DimPlot(scRNA, reduction = "tsne",label =F ,group.by="celltype")
+plot3
+plot4
+```
+
+* **Evaluate clustering effect through Hacc,Hpur and ARI**
+
+- Entropy of cluster accuracy (Hacc),Entropy of cluster purity (Hpur),adjusted Rand index (ARI) assess the similarity of predicted cluster labels to a known ground truth.\n
+- Hacc measures the diversity of the ground-truth labels within each predicted cluster group assigned by the clustering algorithm.(The smaller the value, the better the effect)\n
+- Hpur measures the diversity of the predicted cluster labels within each of the ground-truth groups.(The smaller the value, the better the effect)
+- ARI reflects the degree of overlap between the two divisions.(The higher the value, the better the effect)\n
+- To compare imputation methods across metrics, the metrics were re-scaled to between 0 and 1 and the order of Hacc and Hpur were flipped to where a higher standardized score translates to better performance.
+
+```{r , echo=FALSE, message=F,warning=FALSE, out.width=c('100%'), fig.show='hold'}
+lncRNA_cluster =  read.csv(lncRNACluster)
+protein_cluster =  read.csv(proteinCluster)
+allRNA_cluster=read.csv(AllCluster)
+
+Evaluate_clustering_effects1 = function(partial_RNA,all_RNA,type="lncRNA"){
+    ACC <- PUR <- ARI <- NULL
+    acc <- -mean(sapply(unique(partial_RNA$cluster_ID),function(i){
+      p = table(all_RNA[partial_RNA$cluster_ID==i,]$cluster_ID)/ sum(partial_RNA$cluster_ID==i)
+      sum(p * log(p))
+    }))
+    acc = 1-acc
+    ACC = c(ACC, acc)
+    pur <- -mean(sapply(unique(all_RNA$cluster_ID),function(i){
+      p = table(partial_RNA[all_RNA$cluster_ID==i,]$cluster_ID)/ sum(all_RNA$cluster_ID==i)
+      sum(p * log(p))
+    }))
+    pur = 1-pur
+    PUR = c(PUR, pur) 
+    ARI <- c(ARI,adjustedRandIndex(all_RNA$cluster_ID,partial_RNA$cluster_ID))
+    df = data.frame(type=type,Hacc =ACC, Hpur=PUR, ARI = ARI)
+}
+lncRNA1=Evaluate_clustering_effects1(lncRNA_cluster,allRNA_cluster,type="lncRNA")
+mRNA1=Evaluate_clustering_effects1(protein_cluster,allRNA_cluster,type="mRNA")
+cluster1=rbind(lncRNA1,mRNA1)
+datatable(cluster1,rownames = FALSE, filter="top", options = list(pageLength = 5, scrollX=T))
+
+Evaluate_clustering_effects = function(partial_RNA,all_RNA,type="lncRNA"){
+    ACC <- PUR <- ARI <- NULL
+    acc <- -mean(sapply(unique(partial_RNA$cluster_ID),function(i){
+      p = table(all_RNA[partial_RNA$cluster_ID==i,]$cluster_ID)/ sum(partial_RNA$cluster_ID==i)
+      sum(p * log(p))
+    }))
+    acc = 1-acc
+    ACC = data.frame(type=type,method="Hacc",values=acc)
+    pur <- -mean(sapply(unique(all_RNA$cluster_ID),function(i){
+      p = table(partial_RNA[all_RNA$cluster_ID==i,]$cluster_ID)/ sum(all_RNA$cluster_ID==i)
+      sum(p * log(p))
+    }))
+    pur = 1-pur
+    PUR = data.frame(type=type,method="Hpur",values=pur)
+    ari <- adjustedRandIndex(all_RNA$cluster_ID,partial_RNA$cluster_ID)
+    ARI = data.frame(type=type,method="ARI",values=ari)
+    df1 = rbind(ACC,PUR,ARI)
+}
+lncRNA=Evaluate_clustering_effects(lncRNA_cluster,allRNA_cluster,type="lncRNA")
+mRNA=Evaluate_clustering_effects(protein_cluster,allRNA_cluster,type="mRNA")
+cluster=rbind(lncRNA,mRNA)
+dark2 <- c("#a3d393","#88c4e8")
+ggplot(cluster, aes(x=method, y=values)) +
+  geom_col(aes(fill=type), color="black", position="dodge",width =0.8) +
+  ylab("value") +
+  scale_fill_manual(values=dark2) +
+  scale_y_continuous(expand=c(0,0)) +
+  theme_classic() +
+  theme(strip.background=element_blank(),
+        strip.text = element_text(size=11),
+        legend.title = element_blank(),
+        legend.text = element_text(size=12),
+        axis.text.y=element_text(size=10, color='black'),
+        axis.text.x=element_text(size=10, color='black', angle=45, hjust=1),
+        axis.title.x=element_blank(),
+        axis.ticks.x=element_blank())
+```
